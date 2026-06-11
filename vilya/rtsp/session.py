@@ -54,10 +54,12 @@ class WFDSession:
         self,
         sink_host: str,
         local_host: str,
+        sink_port: int = RTSP_PORT,
         on_state_change: Optional[Callable[[SessionState], None]] = None,
     ) -> None:
         self.sink_host = sink_host
         self.local_host = local_host
+        self.sink_port = sink_port
         self._on_state_change = on_state_change
 
         self._state = SessionState.IDLE
@@ -68,6 +70,8 @@ class WFDSession:
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._buf = RTSPBuffer()
+        self._server: Optional[asyncio.AbstractServer] = None
+        self._recv_task: Optional[asyncio.Task] = None
         self._keepalive_task: Optional[asyncio.Task] = None
         self._pending: dict[int, asyncio.Future] = {}  # cseq -> Future
 
@@ -80,19 +84,79 @@ class WFDSession:
         return self._state
 
     async def connect(self) -> None:
-        """Open the TCP control channel and run the handshake."""
-        log.info("Connecting to sink %s:%d", self.sink_host, RTSP_PORT)
+        """Open the TCP control channel and run the handshake.
+
+        Note: in WFD the *source* normally listens and the *sink* dials in
+        (see :meth:`serve`). This active-connect path is kept for sinks
+        that expect the source to connect, and for tests.
+        """
+        log.info("Connecting to sink %s:%d", self.sink_host, self.sink_port)
         self._reader, self._writer = await asyncio.open_connection(
-            self.sink_host, RTSP_PORT
+            self.sink_host, self.sink_port
         )
         self._set_state(SessionState.IDLE)
-        recv_task = asyncio.create_task(self._recv_loop(), name="rtsp-recv")
+        self._recv_task = asyncio.create_task(self._recv_loop(), name="rtsp-recv")
         try:
             await self._handshake()
         except Exception:
-            recv_task.cancel()
+            self._recv_task.cancel()
             raise
         # recv_task keeps running for keepalives / sink-initiated messages.
+
+    async def serve(
+        self,
+        listen_host: str = "0.0.0.0",
+        listen_port: int = RTSP_PORT,
+        accept_timeout: float = 30,
+    ) -> None:
+        """Listen for the sink's RTSP connection, then drive the handshake.
+
+        This is the spec-correct source role: the WFD source listens on
+        its RTSP port (7236) and the sink initiates the TCP connection to
+        it. Once the sink connects, the source still sends M1 (OPTIONS).
+        """
+        loop = asyncio.get_event_loop()
+        accepted: asyncio.Future = loop.create_future()
+
+        async def _on_client(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            if accepted.done():
+                writer.close()
+                return
+            accepted.set_result((reader, writer))
+
+        self._server = await asyncio.start_server(
+            _on_client, listen_host, listen_port
+        )
+        log.info(
+            "Listening for sink on %s:%d (sink should connect to us)",
+            listen_host,
+            listen_port,
+        )
+        try:
+            self._reader, self._writer = await asyncio.wait_for(
+                accepted, accept_timeout
+            )
+        except asyncio.TimeoutError:
+            self._server.close()
+            raise TimeoutError(
+                f"Sink did not connect to RTSP {listen_host}:{listen_port} "
+                f"within {accept_timeout}s"
+            ) from None
+
+        peer = self._writer.get_extra_info("peername")
+        log.info("Sink connected from %s", peer)
+        # Stop accepting further connections.
+        self._server.close()
+
+        self._set_state(SessionState.IDLE)
+        self._recv_task = asyncio.create_task(self._recv_loop(), name="rtsp-recv")
+        try:
+            await self._handshake()
+        except Exception:
+            self._recv_task.cancel()
+            raise
 
     async def teardown(self) -> None:
         """Initiate a clean teardown."""
@@ -101,6 +165,8 @@ class WFDSession:
         self._set_state(SessionState.TEARDOWN)
         if self._keepalive_task:
             self._keepalive_task.cancel()
+        if self._server:
+            self._server.close()
         try:
             await self._send_set_parameter_trigger("TEARDOWN")
         except Exception:
@@ -108,6 +174,8 @@ class WFDSession:
         if self._writer:
             self._writer.close()
             await self._writer.wait_closed()
+        if self._recv_task:
+            self._recv_task.cancel()
 
     # ------------------------------------------------------------------
     # Internal: state

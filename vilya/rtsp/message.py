@@ -214,6 +214,11 @@ class RTSPBuffer:
 
     def take_message(self) -> Optional[RTSPMessage]:
         """Return the next complete message, or None if more data is needed."""
+        # Tolerate stray CRLFs between messages (Samsung sinks append an
+        # extra one after requests); RFC 2326 says to ignore them.
+        while self._buf[:2] == b"\r\n":
+            del self._buf[:2]
+
         header_end = self._buf.find(b"\r\n\r\n")
         if header_end == -1:
             return None
@@ -222,6 +227,8 @@ class RTSPBuffer:
         try:
             header_text = header_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
+            # Consume the garbage so callers can resync on the next message.
+            del self._buf[: header_end + 4]
             raise RTSPParseError(f"Header decode error: {exc}") from exc
 
         # Determine expected body length.

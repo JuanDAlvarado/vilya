@@ -75,9 +75,13 @@ def build_pipeline(
             raise ValueError("screen source requires pipewire fd and node id")
         # Convert to I420 before scaling: half the bytes of BGRx, and at
         # native panel resolution videoscale becomes a passthrough.
+        # keepalive-time: KWin only sends frames on screen damage; a
+        # static desktop would starve the TS stream and the sink drops
+        # the session after ~20 s of silence. Resend the last frame
+        # every 500 ms when idle.
         head = (
             f"pipewiresrc fd={pipewire_fd} path={pipewire_node} "
-            f"do-timestamp=true "
+            f"do-timestamp=true keepalive-time=500 "
             f"! {_LEAKY_Q} "
             f"! videoconvert n-threads=4 ! video/x-raw,format=I420 "
             f"! videoscale ! videorate ! {caps} "

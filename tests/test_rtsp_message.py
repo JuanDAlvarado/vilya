@@ -275,3 +275,43 @@ class TestRTSPBuffer:
         buf.feed(OPTIONS_RESPONSE)
         msg = buf.take_message()
         assert msg is not None and msg.is_response
+
+
+class TestStrayCRLF:
+    """Samsung sinks append an extra CRLF after requests; the buffer must
+    skip it instead of failing on the next message."""
+
+    def test_leading_crlf_skipped(self):
+        from vilya.rtsp.message import RTSPBuffer
+
+        buf = RTSPBuffer()
+        buf.feed(b"\r\nOPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+        msg = buf.take_message()
+        assert msg is not None and msg.method == "OPTIONS"
+
+    def test_trailing_crlf_between_messages(self):
+        from vilya.rtsp.message import RTSPBuffer
+
+        buf = RTSPBuffer()
+        # TEARDOWN with Samsung's stray CRLF, then a keepalive request.
+        buf.feed(
+            b"TEARDOWN rtsp://x/wfd1.0 RTSP/1.0\r\nCSeq: 4\r\n\r\n"
+            b"\r\n"
+            b"GET_PARAMETER rtsp://x/wfd1.0 RTSP/1.0\r\nCSeq: 5\r\n\r\n"
+        )
+        first = buf.take_message()
+        second = buf.take_message()
+        assert first is not None and first.method == "TEARDOWN"
+        assert second is not None and second.method == "GET_PARAMETER"
+
+    def test_garbage_is_consumed_so_resync_works(self):
+        import pytest
+
+        from vilya.rtsp.message import RTSPBuffer, RTSPParseError
+
+        buf = RTSPBuffer()
+        buf.feed(b"\xff\xfe garbage \xff\r\n\r\n" b"OPTIONS * RTSP/1.0\r\nCSeq: 9\r\n\r\n")
+        with pytest.raises(RTSPParseError):
+            buf.take_message()
+        msg = buf.take_message()
+        assert msg is not None and msg.method == "OPTIONS"

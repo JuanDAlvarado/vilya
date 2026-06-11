@@ -12,7 +12,13 @@ import enum
 import logging
 from typing import Callable, Optional
 
-from .message import RTSPBuffer, RTSPMessage, format_request, format_response
+from .message import (
+    RTSPBuffer,
+    RTSPMessage,
+    RTSPParseError,
+    format_request,
+    format_response,
+)
 
 log = logging.getLogger(__name__)
 
@@ -212,16 +218,32 @@ class WFDSession:
             while True:
                 chunk = await self._reader.read(4096)
                 if not chunk:
-                    log.info("Sink closed connection")
+                    log.info("Sink closed the control connection")
                     break
                 log.debug("<< %s", chunk[:200])
                 self._buf.feed(chunk)
-                while (msg := self._buf.take_message()) is not None:
+                while True:
+                    # A malformed message must not kill the session:
+                    # take_message() already consumed the bad bytes, so
+                    # log and move on to the next message.
+                    try:
+                        msg = self._buf.take_message()
+                    except RTSPParseError as exc:
+                        log.warning("Skipping unparseable RTSP data: %s", exc)
+                        continue
+                    if msg is None:
+                        break
                     await self._dispatch(msg)
         except asyncio.CancelledError:
-            pass
+            return
         except Exception as exc:
             log.error("recv loop error: %s", exc)
+        # The control channel is gone (EOF or fatal error). Surface that
+        # as TEARDOWN so the caller exits instead of streaming blind.
+        if self._state != SessionState.TEARDOWN:
+            self._set_state(SessionState.TEARDOWN)
+            if self._keepalive_task:
+                self._keepalive_task.cancel()
 
     async def _dispatch(self, msg: RTSPMessage) -> None:
         """Route an inbound message to a pending request future or a handler."""
@@ -269,7 +291,10 @@ class WFDSession:
         self._pending[cseq] = fut
 
         await self._send(format_request(method, uri, headers, body))
-        return await asyncio.wait_for(fut, timeout=10)
+        try:
+            return await asyncio.wait_for(fut, timeout=10)
+        finally:
+            self._pending.pop(cseq, None)
 
     async def _reply(
         self,

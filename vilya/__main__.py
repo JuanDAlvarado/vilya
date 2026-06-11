@@ -19,6 +19,7 @@ import sys
 
 from .media.pipeline import MediaPipeline, missing_elements
 from .media.portal import ScreenCastSession
+from .modes import MODES
 from .p2p.dhcp import SERVER_IP, DHCPServer
 from .p2p.nm import NMP2PDevice
 from .p2p.supplicant import Group, P2PDevice
@@ -146,7 +147,7 @@ async def cmd_connect(args: argparse.Namespace) -> int:
         pw_fd = pw_node = None
         if args.source == "screen":
             portal = ScreenCastSession()
-            await portal.open()
+            await portal.open(force_picker=args.reselect)
             pw_fd, pw_node = portal.pipewire_fd, portal.node_id
 
         # In WFD the source LISTENS on its RTSP port (7236) and the sink
@@ -157,9 +158,11 @@ async def cmd_connect(args: argparse.Namespace) -> int:
             local_ip,
             sink_ip,
         )
+        mode = MODES[args.mode]
         session = WFDSession(
             sink_ip,
             local_ip,
+            video_format_line=mode.m4_video_formats,
             on_state_change=lambda s: log.info("RTSP state: %s", s.value),
         )
         # Bind 0.0.0.0 so we accept the sink's connection on whichever
@@ -176,6 +179,7 @@ async def cmd_connect(args: argparse.Namespace) -> int:
                         source=args.source,
                         pipewire_fd=pw_fd,
                         pipewire_node=pw_node,
+                        mode=mode,
                     )
                     pipeline.start()
                 if pipeline and pipeline.poll() is not None:
@@ -233,6 +237,18 @@ def main() -> int:
         default="screen",
         help="video source: 'screen' (Wayland portal capture, default) or "
         "'test' (SMPTE bars, validates the media path)",
+    )
+    p_conn.add_argument(
+        "--mode",
+        choices=sorted(MODES),
+        default="1080p30",
+        help="video mode (resolution/framerate); 1080p30 is the panel's "
+        "native resolution so no scaling is needed",
+    )
+    p_conn.add_argument(
+        "--reselect",
+        action="store_true",
+        help="show the screen picker again instead of reusing the saved choice",
     )
     p_conn.set_defaults(func=cmd_connect)
 

@@ -1,9 +1,15 @@
 """GStreamer media pipeline for the WFD RTP stream.
 
 Runs gst-launch-1.0 as a subprocess (no PyGObject dependency for the
-prototype). Video-only for now: H.264 constrained-baseline level 3.1 at
-1280x720p30 -- matching what we declare in M4 -- muxed into MPEG-TS,
-RTP-payloaded (PT 33), and sent to the sink's negotiated UDP port.
+prototype). Video-only for now: H.264 per the negotiated VideoMode,
+muxed into MPEG-TS, RTP-payloaded (PT 33), sent to the sink's UDP port.
+
+Latency discipline (the first cut accumulated ~7 s):
+- leaky queues drop stale frames instead of queueing them, so a slow
+  frame costs one frame, not permanent added delay
+- videoconvert is multithreaded
+- x264 runs zerolatency with a small VBV buffer (300 ms ceiling)
+- udpsink sync=false pushes packets the moment they exist
 
 Audio (LPCM 48 kHz) is deferred; see docs/todo.md Phase 3.
 """
@@ -16,26 +22,14 @@ import shutil
 import subprocess
 from typing import Optional
 
+from ..modes import MODES, VideoMode
+
 log = logging.getLogger(__name__)
 
-WIDTH = 1280
-HEIGHT = 720
-FPS = 30
-BITRATE_KBPS = 8000
+DEFAULT_MODE = MODES["1080p30"]
 
-# x264 in constrained-baseline needs no B-frames; zerolatency also forces
-# this, but be explicit. key-int-max=FPS gives one IDR per second so the
-# sink can join/recover quickly.
-ENCODE_TAIL = (
-    f"videoconvert ! video/x-raw,format=I420 "
-    f"! x264enc tune=zerolatency speed-preset=superfast bframes=0 "
-    f"bitrate={BITRATE_KBPS} key-int-max={FPS} "
-    f"! video/x-h264,profile=constrained-baseline,level=(string)3.1 "
-    f"! h264parse config-interval=1 "
-    f"! mpegtsmux alignment=7 "
-    f"! rtpmp2tpay "
-    f"! udpsink name=vilya-rtp sync=false"
-)
+# Bounded, lossy decoupling: never let latency build up in the pipeline.
+_LEAKY_Q = "queue max-size-buffers=2 leaky=downstream"
 
 REQUIRED_ELEMENTS = [
     "x264enc",  # gst-plugins-ugly
@@ -64,9 +58,13 @@ def build_pipeline(
     source: str = "screen",
     pipewire_fd: Optional[int] = None,
     pipewire_node: Optional[int] = None,
+    mode: VideoMode = DEFAULT_MODE,
 ) -> str:
     """Return the gst-launch pipeline description string."""
-    caps = f"video/x-raw,width={WIDTH},height={HEIGHT},framerate={FPS}/1"
+    caps = (
+        f"video/x-raw,format=I420,width={mode.width},height={mode.height},"
+        f"framerate={mode.fps}/1"
+    )
     if source == "test":
         head = (
             f"videotestsrc is-live=true pattern=smpte ! {caps} "
@@ -75,19 +73,30 @@ def build_pipeline(
     elif source == "screen":
         if pipewire_fd is None or pipewire_node is None:
             raise ValueError("screen source requires pipewire fd and node id")
+        # Convert to I420 before scaling: half the bytes of BGRx, and at
+        # native panel resolution videoscale becomes a passthrough.
         head = (
             f"pipewiresrc fd={pipewire_fd} path={pipewire_node} "
             f"do-timestamp=true "
-            f"! videorate ! videoscale ! videoconvert ! {caps} "
+            f"! {_LEAKY_Q} "
+            f"! videoconvert n-threads=4 ! video/x-raw,format=I420 "
+            f"! videoscale ! videorate ! {caps} "
         )
     else:
         raise ValueError(f"Unknown source {source!r}")
 
-    tail = ENCODE_TAIL.replace(
-        "udpsink name=vilya-rtp",
-        f"udpsink name=vilya-rtp host={sink_host} port={sink_port}",
+    tail = (
+        f"! {_LEAKY_Q} "
+        f"! x264enc tune=zerolatency speed-preset=superfast bframes=0 "
+        f"bitrate={mode.bitrate_kbps} key-int-max={mode.fps} "
+        f"vbv-buf-capacity=300 "
+        f"! video/x-h264,profile={mode.gst_profile} "
+        f"! h264parse config-interval=1 "
+        f"! mpegtsmux alignment=7 "
+        f"! rtpmp2tpay "
+        f"! udpsink host={sink_host} port={sink_port} sync=false"
     )
-    return head + "! " + tail
+    return head + tail
 
 
 class MediaPipeline:
@@ -100,9 +109,10 @@ class MediaPipeline:
         source: str = "screen",
         pipewire_fd: Optional[int] = None,
         pipewire_node: Optional[int] = None,
+        mode: VideoMode = DEFAULT_MODE,
     ) -> None:
         self.description = build_pipeline(
-            sink_host, sink_port, source, pipewire_fd, pipewire_node
+            sink_host, sink_port, source, pipewire_fd, pipewire_node, mode
         )
         self._pipewire_fd = pipewire_fd
         self._proc: Optional[subprocess.Popen] = None

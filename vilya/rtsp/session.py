@@ -55,11 +55,13 @@ class WFDSession:
         sink_host: str,
         local_host: str,
         sink_port: int = RTSP_PORT,
+        video_format_line: Optional[str] = None,
         on_state_change: Optional[Callable[[SessionState], None]] = None,
     ) -> None:
         self.sink_host = sink_host
         self.local_host = local_host
         self.sink_port = sink_port
+        self.video_format_line = video_format_line
         self._on_state_change = on_state_change
 
         self._state = SessionState.IDLE
@@ -355,10 +357,13 @@ class WFDSession:
     # M4 -- Source sets WFD presentation parameters.
     async def _send_m4(self) -> None:
         self._set_state(SessionState.M4_SENT)
-        # Single mode matching the Tab's M3 caps: H.264 CBP (profile 01)
-        # level 3.1 (01), CEA bit 5 = 1280x720p30. LPCM 48kHz stereo.
+        # Video line comes from the selected VideoMode (vilya/modes.py);
+        # the fallback is CBP L3.1 720p30. LPCM 48kHz stereo.
+        video_line = self.video_format_line or (
+            "wfd_video_formats: 00 00 01 01 00000020 00000000 00000000 00 0000 0000 00 none none"
+        )
         body = (
-            "wfd_video_formats: 00 00 01 01 00000020 00000000 00000000 00 0000 0000 00 none none\r\n"
+            f"{video_line}\r\n"
             "wfd_audio_codecs: LPCM 00000002 00\r\n"
             f"wfd_presentation_URL: rtsp://{self.local_host}/wfd1.0/streamid=0 none\r\n"
             "wfd_client_rtp_ports: RTP/AVP/UDP;unicast 19000 0 mode=play\r\n"

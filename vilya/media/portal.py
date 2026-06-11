@@ -65,8 +65,12 @@ class ScreenCastSession:
         self.pipewire_fd: Optional[int] = None
         self.node_id: Optional[int] = None
 
-    async def open(self) -> None:
-        """Run the full portal negotiation. May show the picker dialog."""
+    async def open(self, force_picker: bool = False) -> None:
+        """Run the full portal negotiation. May show the picker dialog.
+
+        ``force_picker`` ignores the saved restore token so the user can
+        re-choose which screen to share; the new choice is then saved.
+        """
         self._bus = await MessageBus(
             bus_type=BusType.SESSION, negotiate_unix_fd=True
         ).connect()
@@ -86,7 +90,7 @@ class ScreenCastSession:
             "cursor_mode": Variant("u", CURSOR_MODE_EMBEDDED),
             "persist_mode": Variant("u", PERSIST_MODE_PERMANENT),
         }
-        token = _load_restore_token()
+        token = None if force_picker else _load_restore_token()
         if token:
             select_opts["restore_token"] = Variant("s", token)
         await self._request(

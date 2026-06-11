@@ -109,7 +109,34 @@ Goal: screen pixels flow from KDE Plasma → Tab display via RTP.
 - [x] **Hardware test, test source**: SMPTE bars + clock rendered on the Tab
       (2026-06-11). The fuzzy bottom-right box is videotestsrc's built-in noise
       square — worst-case encoder load, passed fine.
-- [ ] **Hardware test, screen source**: `python -m vilya connect` (picker shows once)
+- [x] **Hardware test, screen source**: desktop mirrored to the Tab (2026-06-11).
+      First cut had ~7 s latency at 720p.
+- [x] Latency/resolution pass: leaky queues (drop stale frames instead of
+      accumulating delay), threaded videoconvert, vbv-buf-capacity=300,
+      `--mode 720p30|1080p30|1080p60` (default 1080p30 = panel-native, no
+      scaling; M4 line derives from the mode — CHP L4.2 for 1080p)
+- [x] **Hardware test: latency + 1080p30** — sub-0.5 s perceived latency,
+      native-res mirror working (2026-06-11)
+- [x] `--reselect` flag: re-show the portal screen picker (otherwise the
+      saved restore token reconnects silently)
+- [ ] Try `--mode 1080p60`
+
+### Known behavior / open items
+
+- Samsung shows "Can't show protected content. Stream is not secure." on
+  connect: informational — we do no HDCP, so DRM apps won't render over this
+  link; normal desktop pixels are unaffected. Implementing HDCP 2.x is out of
+  scope (licensed keys). May also flash during the ~1 s PLAY→first-RTP gap.
+- **Extended (vs mirrored) display**: requires creating a virtual output. KWin
+  (Plasma 6.6) exposes no D-Bus for this; the path is KWin's
+  `zkde_screencast_unstable_v1` Wayland protocol (create-virtual-output-stream,
+  as used by krfb-virtualmonitor) → yields a PipeWire node directly. Pairs
+  naturally with streaming a Tab-native-ish resolution (2560x1600 via WFD VESA
+  modes) since a virtual display isn't bound to the panel's 1080p. Big feature,
+  own cycle.
+- Mirror resolution is capped by the panel (1920x1080): streaming higher would
+  only upscale. Higher-than-panel resolution only makes sense with a virtual
+  display (above).
 - [ ] Audio: LPCM 48 kHz capture (pipewiresrc monitor) muxed into the TS
 - [ ] Complete `_process_m3_response`: real capability negotiation for M4
 - [ ] Tune encoder (bitrate/latency); consider vah264enc (Intel VA-API) later

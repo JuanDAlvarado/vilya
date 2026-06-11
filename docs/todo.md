@@ -91,18 +91,29 @@ Findings that unblocked this phase (2026-06-11):
 
 ---
 
-## Phase 3: Media Pipeline — TODO
+## Phase 3: Media Pipeline — IN PROGRESS (built 2026-06-11, needs hardware test)
 
 Goal: screen pixels flow from KDE Plasma → Tab display via RTP.
 
-- [ ] PipeWire screen capture (pipewire-portal / xdg-desktop-portal)
-- [ ] GStreamer pipeline: `pipewiresrc → videoconvert → x264enc (CBP, CBR) → mpegtsmux → rtpmp2tpay → udpsink`
-  - RTP destination: sink IP, port 19000, blocksize 1328
-  - Audio: `pipewiresrc (monitor) → audioconvert → audioresample → rawaudioenc (LPCM 48kHz stereo) → mux`
-- [ ] Wire GStreamer start/stop to `STREAMING` / `TEARDOWN` state transitions in `WFDSession`
-- [ ] Complete `_process_m3_response`: parse sink's `wfd_video_formats` and `wfd_audio_codecs`,
-  select best mutually supported profile/level, populate M4 `SET_PARAMETER` body dynamically
-- [ ] Tune H.264 encoder parameters (keyframe interval, bitrate, latency preset)
+- [x] `vilya/media/portal.py` — xdg-desktop-portal ScreenCast negotiation
+      (session bus; restore-token persisted in ~/.local/state/vilya so the
+      picker dialog appears only once)
+- [x] `vilya/media/pipeline.py` — gst-launch subprocess: 720p30 H.264 CBP L3.1
+      (matches M4) → mpegtsmux alignment=7 → rtpmp2tpay → udpsink. `--source
+      test` (SMPTE bars + clock) to validate the path before real capture.
+- [x] Pipeline start on STREAMING, stop on TEARDOWN/pipeline-death; RTP port
+      parsed from M6 SETUP `client_port`
+- [x] M4 now selects one mode (CBP L3.1 720p30) matching the Tab's M3 caps
+- [x] **No more sudo for the NM backend** — polkit allows user P2P activation,
+      and the portal *requires* the user session. supplicant backend still root.
+- [x] **Hardware test, test source**: SMPTE bars + clock rendered on the Tab
+      (2026-06-11). The fuzzy bottom-right box is videotestsrc's built-in noise
+      square — worst-case encoder load, passed fine.
+- [ ] **Hardware test, screen source**: `python -m vilya connect` (picker shows once)
+- [ ] Audio: LPCM 48 kHz capture (pipewiresrc monitor) muxed into the TS
+- [ ] Complete `_process_m3_response`: real capability negotiation for M4
+- [ ] Tune encoder (bitrate/latency); consider vah264enc (Intel VA-API) later
+- [ ] Latency/quality pass once pixels are flowing
 
 ---
 

@@ -17,6 +17,8 @@ import shutil
 import subprocess
 import sys
 
+from .media.pipeline import MediaPipeline, missing_elements
+from .media.portal import ScreenCastSession
 from .p2p.dhcp import SERVER_IP, DHCPServer
 from .p2p.nm import NMP2PDevice
 from .p2p.supplicant import Group, P2PDevice
@@ -68,10 +70,21 @@ async def cmd_scan(args: argparse.Namespace) -> int:
 
 
 async def cmd_connect(args: argparse.Namespace) -> int:
+    missing = missing_elements()
+    if missing:
+        log.error(
+            "Missing GStreamer elements: %s. Install: "
+            "sudo pacman -S --needed gst-plugins-good gst-plugins-bad "
+            "gst-plugins-ugly x264",
+            ", ".join(missing),
+        )
+        return 2
+
     dev = _make_backend(args)
     await dev.open()
     dhcp: DHCPServer | None = None
     session: WFDSession | None = None
+    pipeline: MediaPipeline | None = None
     try:
         await dev.set_device_name(args.name)
         await dev.set_wfd_ie()
@@ -126,6 +139,16 @@ async def cmd_connect(args: argparse.Namespace) -> int:
             log.info("Waiting for the Tab to request an IP address...")
             sink_ip = await asyncio.wait_for(lease_fut, timeout=60)
 
+        # Negotiate screen capture BEFORE the RTSP handshake: the portal
+        # may show a picker dialog, and the Tab only waits ~20 s for RTP
+        # after PLAY. With a restore token this is instant.
+        portal = None
+        pw_fd = pw_node = None
+        if args.source == "screen":
+            portal = ScreenCastSession()
+            await portal.open()
+            pw_fd, pw_node = portal.pipewire_fd, portal.node_id
+
         # In WFD the source LISTENS on its RTSP port (7236) and the sink
         # dials in. We advertise 7236 in our WFD IE, so the Tab connects
         # to us at local_ip:7236.
@@ -144,15 +167,33 @@ async def cmd_connect(args: argparse.Namespace) -> int:
         await session.serve(listen_host="0.0.0.0", accept_timeout=args.timeout)
 
         log.info("Handshake driven to %s. Ctrl-C to tear down.", session.state.value)
-        while session.state != SessionState.TEARDOWN:
-            await asyncio.sleep(1)
-        return 0
+        try:
+            while session.state != SessionState.TEARDOWN:
+                if session.state == SessionState.STREAMING and pipeline is None:
+                    pipeline = MediaPipeline(
+                        sink_ip,
+                        session.sink_rtp_port,
+                        source=args.source,
+                        pipewire_fd=pw_fd,
+                        pipewire_node=pw_node,
+                    )
+                    pipeline.start()
+                if pipeline and pipeline.poll() is not None:
+                    log.error("Media pipeline died; tearing down")
+                    break
+                await asyncio.sleep(0.2)
+            return 0
+        finally:
+            if portal:
+                await portal.close()
     except (TimeoutError, asyncio.TimeoutError) as exc:
         log.error("%s", str(exc) or "Timed out (sink never contacted us)")
         return 1
     except KeyboardInterrupt:
         return 0
     finally:
+        if pipeline:
+            pipeline.stop()
         if session:
             try:
                 await session.teardown()
@@ -186,6 +227,13 @@ def main() -> int:
     p_conn = sub.add_parser("connect", help="connect to a sink and run the handshake")
     p_conn.add_argument("--peer", default="Tab", help="substring of sink device name")
     p_conn.add_argument("--timeout", type=int, default=60, help="discovery timeout")
+    p_conn.add_argument(
+        "--source",
+        choices=["screen", "test"],
+        default="screen",
+        help="video source: 'screen' (Wayland portal capture, default) or "
+        "'test' (SMPTE bars, validates the media path)",
+    )
     p_conn.set_defaults(func=cmd_connect)
 
     # Accept global flags after the subcommand too; SUPPRESS keeps the
@@ -207,12 +255,26 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
 
-    if os.geteuid() != 0:
+    # The supplicant backend talks to wpa_supplicant's root-only D-Bus
+    # API and binds DHCP port 67. The NM backend needs neither -- and
+    # screen capture REQUIRES the user session (the portal is not
+    # reachable as root), so don't run nm-backend connects with sudo.
+    if args.backend == "supplicant" and os.geteuid() != 0:
         log.error(
-            "vilya needs root (wpa_supplicant D-Bus policy + DHCP port 67). "
-            "Run: sudo %s -m vilya %s",
+            "The supplicant backend needs root. Run: sudo %s -m vilya %s",
             sys.executable,
             args.command,
+        )
+        return 2
+    if (
+        args.backend == "nm"
+        and os.geteuid() == 0
+        and getattr(args, "source", None) == "screen"
+    ):
+        log.error(
+            "Screen capture needs your user session (xdg-desktop-portal); "
+            "run WITHOUT sudo: %s -m vilya connect",
+            sys.executable,
         )
         return 2
 

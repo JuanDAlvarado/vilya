@@ -66,6 +66,8 @@ class WFDSession:
         self._cseq = 0
         self._session_id: Optional[str] = None
         self._stream_url: Optional[str] = None
+        # RTP port the sink asks us to stream to (from M6 SETUP Transport).
+        self.sink_rtp_port: int = 19000
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -353,9 +355,10 @@ class WFDSession:
     # M4 -- Source sets WFD presentation parameters.
     async def _send_m4(self) -> None:
         self._set_state(SessionState.M4_SENT)
-        # H.264 CBP level 3.2, 1920x1080 30fps, LPCM 48kHz stereo, RTP port 19000.
+        # Single mode matching the Tab's M3 caps: H.264 CBP (profile 01)
+        # level 3.1 (01), CEA bit 5 = 1280x720p30. LPCM 48kHz stereo.
         body = (
-            "wfd_video_formats: 00 00 02 10 0001DEFF 00000000 00000000 00 0000 0000 00 none none\r\n"
+            "wfd_video_formats: 00 00 01 01 00000020 00000000 00000000 00 0000 0000 00 none none\r\n"
             "wfd_audio_codecs: LPCM 00000002 00\r\n"
             f"wfd_presentation_URL: rtsp://{self.local_host}/wfd1.0/streamid=0 none\r\n"
             "wfd_client_rtp_ports: RTP/AVP/UDP;unicast 19000 0 mode=play\r\n"
@@ -395,6 +398,17 @@ class WFDSession:
     async def _handle_setup(self, req: RTSPMessage) -> None:
         if self._state != SessionState.SETUP_WAIT:
             log.warning("SETUP received in unexpected state %s", self._state)
+        transport = req.get_header("Transport") or ""
+        # e.g. RTP/AVP/UDP;unicast;client_port=19000-19001
+        for part in transport.split(";"):
+            if part.strip().startswith("client_port="):
+                ports = part.split("=", 1)[1]
+                try:
+                    self.sink_rtp_port = int(ports.split("-")[0])
+                except ValueError:
+                    log.warning("Unparseable client_port in %r", transport)
+                break
+        log.info("Sink wants RTP on port %d", self.sink_rtp_port)
         self._session_id = "vilya0001"
         await self._reply_ok(
             req,

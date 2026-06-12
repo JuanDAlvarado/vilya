@@ -91,7 +91,7 @@ Findings that unblocked this phase (2026-06-11):
 
 ---
 
-## Phase 3: Media Pipeline — IN PROGRESS (built 2026-06-11, needs hardware test)
+## Phase 3: Media Pipeline — **DONE, VERIFIED ON HARDWARE 2026-06-11/12** (tuning items remain)
 
 Goal: screen pixels flow from KDE Plasma → Tab display via RTP.
 
@@ -163,14 +163,58 @@ Goal: screen pixels flow from KDE Plasma → Tab display via RTP.
 
 ---
 
-## Phase 4: UIBC Touch Input — TODO (future)
+## Phase 4: UIBC Touch Input — **DONE, VERIFIED ON HARDWARE 2026-06-12**
 
 Goal: touch events on the Tab are forwarded back to the Linux host as pointer input.
 
-- [ ] Parse `wfd_uibc_capability` from M3 response
-- [ ] Negotiate UIBC in M4 `SET_PARAMETER`
-- [ ] TCP back-channel listener for UIBC HID events
-- [ ] Translate UIBC touch events to `uinput` pointer events on the host
+- [x] Parse `wfd_uibc_capability` from M3 response
+- [x] Negotiate UIBC in M4 `SET_PARAMETER` (Generic SingleTouch)
+- [x] TCP back-channel listener for UIBC HID events (`vilya/input/uibc.py`)
+- [x] Translate UIBC touch events to `uinput` pointer events on the host
+      (`vilya/input/uinput.py` — absolute pointer mapped to the cast output)
+- [ ] MultiTouch + Keyboard (the Tab offers both; we currently use
+      SingleTouch as a pointer — tap = click)
+
+---
+
+## Phase 5: UX — cast picker UI — **DONE, VERIFIED ON HARDWARE 2026-06-12**
+
+Goal: the Win+K experience — a summonable picker instead of a terminal.
+
+- [x] `vilya/ui/app.py` — PySide6 tray app: scan list (WFD-capable peers
+      selectable), Mirror/Extend toggle, mode dropdown, connect/disconnect.
+      Thin shell over the CLI via QProcess, so the protocol stays in one
+      place; single-instance via QLocalSocket (relaunch = raise window)
+- [x] `vilya scan --porcelain` — machine-readable `name\taddress\twfd` for
+      the UI (and anything else) to consume
+- [x] `vilya ui` / `vilya setup-ui` subcommands; `pip install .[ui]` extra
+      for PySide6
+- [x] Meta+K global shortcut, registered live with kglobalaccel
+- [ ] Tray/daemon mode polish: start hidden on login, KRunner entry
+
+### kglobalacceld can crash the compositor (learned in blood, 2026-06-12)
+
+Two full KWin session crashes taught us how NOT to register a global
+shortcut on Plasma:
+
+- `plasma-kglobalaccel.service` is a decoy on this Plasma version — the
+  real kglobalacceld lives **inside kwin_wayland** (the standalone binary
+  exits 0 immediately because the bus name is taken). "Restart the
+  shortcut daemon" is a no-op at best.
+- KGlobalAccel marshals a QKeySequence over D-Bus as **exactly four
+  int32s** and the demarshaller reads all four without checking the array
+  length (`kglobalshortcutinfo_dbus.cpp`). Any client that sends a
+  shorter `(ai)` — say, a hand-rolled `busctl` probe with one int — makes
+  kwin_wayland abort via a fatal libdbus check. An unprivileged process
+  can kill the whole Wayland session with one well-typed message;
+  upstream-reportable.
+- The correct, crash-free path (what `setup-ui` now does): the daemon's
+  own client API over dbus-fast — `doRegister(actionId)` then
+  `setShortcutKeys(actionId, [[key,0,0,0]], 6)` (SetPresent |
+  NoAutoloading). A componentUnique ending in `.desktop` makes the daemon
+  create a KServiceActionComponent that launches the desktop entry itself
+  and survives our client disconnecting; the daemon persists
+  kglobalshortcutsrc on its own (batched ~500 ms).
 
 ---
 
@@ -180,8 +224,8 @@ Goal: touch events on the Tab are forwarded back to the Linux host as pointer in
 |---|---|
 | HDCP | Advertised by Tab, skipped by us — Tab does not require it |
 | microsoft_* / intel_* extensions | Tab replies `none` to all — not implemented |
-| Audio codec | LPCM only (48kHz stereo); AAC advertised by Tab but not needed |
-| Video codec | H.264 CBP level 3.2, up to 1080p60 |
+| Audio codec | AAC 48 kHz stereo (Tab offers it in M3; WFD LPCM needs private-stream TS encapsulation GStreamer lacks) |
+| Video codec | H.264 CBP L3.1–CHP L4.2 depending on mode; Tab accepts VESA 1920x1200p30 despite not advertising it |
 | RTP port | 19000 UDP (sink), blocksize 1328 |
 | RTSP port | source LISTENS on 7236; sink dials in. Sink's advertised port (Tab 49158) is not a control listener |
 | Keepalive interval | 30 s (GET_PARAMETER) |

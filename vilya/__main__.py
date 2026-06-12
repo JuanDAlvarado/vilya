@@ -20,6 +20,9 @@ import sys
 
 import json
 
+from dbus_fast import BusType, Message, MessageType
+from dbus_fast.aio import MessageBus
+
 from .input.uibc import (
     GENERIC_TOUCH_DOWN,
     GENERIC_TOUCH_MOVE,
@@ -75,6 +78,11 @@ async def cmd_scan(args: argparse.Namespace) -> int:
         if not dev.peers:
             log.warning("No P2P peers found")
             return 1
+        if args.porcelain:
+            for peer in dev.peers.values():
+                wfd = "wfd" if peer.rtsp_port else "-"
+                print(f"{peer.name}\t{peer.address}\t{wfd}", flush=True)
+            return 0
         print(f"{'NAME':30s} {'ADDRESS':17s}")
         for peer in dev.peers.values():
             print(f"{peer.name:30s} {peer.address:17s}")
@@ -388,6 +396,86 @@ async def cmd_setup_extend(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_setup_ui(args: argparse.Namespace) -> int:
+    """Install the cast-picker desktop entry and the Meta+K shortcut."""
+    venv_bin = os.path.dirname(sys.executable)
+    dedicated = os.path.join(venv_bin, "vilya-python")
+    exe = dedicated if os.path.exists(dedicated) else sys.executable
+
+    apps = os.path.join(
+        os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
+        "applications",
+    )
+    os.makedirs(apps, exist_ok=True)
+    desktop = os.path.join(apps, "vilya-ui.desktop")
+    with open(desktop, "w") as f:
+        f.write(
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=Vilya Cast\n"
+            "Comment=Cast to a wireless display\n"
+            f"Exec={exe} -m vilya ui\n"
+            "Icon=video-display\n"
+            "Categories=Utility;\n"
+            "X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1\n"
+        )
+    log.info("Desktop entry: %s", desktop)
+
+    subprocess.run(["kbuildsycoca6"], capture_output=True)
+
+    # Bind Meta+K through the shortcut daemon's client API: a ".desktop"
+    # component unique name makes it create a KServiceActionComponent that
+    # outlives this client, and it persists kglobalshortcutsrc itself.
+    # Never restart plasma-kglobalaccel (the daemon lives inside
+    # kwin_wayland) and never send a QKeySequence with fewer than four
+    # ints — the daemon demarshals exactly four and aborts the compositor
+    # on a short array.
+    meta_k = 0x1000004B  # Qt::MetaModifier | Qt::Key_K
+    action_id = ["vilya-ui.desktop", "_launch", "Vilya Cast", "Vilya Cast"]
+    try:
+        bus = await MessageBus(bus_type=BusType.SESSION).connect()
+        try:
+            for member, signature, body in (
+                ("doRegister", "as", [action_id]),
+                (
+                    "setShortcutKeys",
+                    "asa(ai)u",
+                    # 6 = SetPresent | NoAutoloading
+                    [action_id, [[[meta_k, 0, 0, 0]]], 6],
+                ),
+            ):
+                reply = await bus.call(
+                    Message(
+                        destination="org.kde.kglobalaccel",
+                        path="/kglobalaccel",
+                        interface="org.kde.KGlobalAccel",
+                        member=member,
+                        signature=signature,
+                        body=body,
+                    )
+                )
+                if reply.message_type == MessageType.ERROR:
+                    raise RuntimeError(f"{member}: {reply.error_name}")
+        finally:
+            bus.disconnect()
+        log.info("Meta+K bound to the cast picker (vilya ui)")
+    except Exception as exc:
+        log.warning("Live shortcut registration failed: %s", exc)
+        subprocess.run(
+            [
+                "kwriteconfig6",
+                "--file", "kglobalshortcutsrc",
+                "--group", "services",
+                "--group", "vilya-ui.desktop",
+                "--key", "_launch",
+                "Meta+K",
+            ],
+            check=True,
+        )
+        log.info("Shortcut written to config; takes effect at next login")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="vilya")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -405,6 +493,11 @@ def main() -> int:
 
     p_scan = sub.add_parser("scan", help="list visible P2P peers")
     p_scan.add_argument("--time", type=int, default=15, help="scan seconds")
+    p_scan.add_argument(
+        "--porcelain",
+        action="store_true",
+        help="machine-readable output: name<TAB>address<TAB>wfd",
+    )
     p_scan.set_defaults(func=cmd_scan)
 
     p_conn = sub.add_parser("connect", help="connect to a sink and run the handshake")
@@ -450,6 +543,15 @@ def main() -> int:
     )
     p_setup.set_defaults(func=cmd_setup_extend)
 
+    p_ui = sub.add_parser("ui", help="open the cast picker (tray app)")
+    p_ui.set_defaults(func=None)
+
+    p_setup_ui = sub.add_parser(
+        "setup-ui",
+        help="install the desktop entry and bind Meta+K to the cast picker",
+    )
+    p_setup_ui.set_defaults(func=cmd_setup_ui)
+
     # Accept global flags after the subcommand too; SUPPRESS keeps the
     # subparser from clobbering values given before it.
     for p in (p_scan, p_conn):
@@ -463,6 +565,12 @@ def main() -> int:
         )
 
     args = parser.parse_args()
+
+    if args.command == "ui":
+        from .ui.app import main as ui_main
+
+        return ui_main()
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",

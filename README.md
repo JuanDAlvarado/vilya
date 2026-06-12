@@ -2,11 +2,16 @@
 
 Vilya is my attempt to implement a Windows Key + K type implementation to my Dell XPS 13 running Arch Linux and KDE Plasma. The goal is for this to be as frictionless as possible with the least amount of dependencies as possible.
 
-**Status:** It works. Extended display, touch input, and audio — verified
-against a Samsung Tab S8+ from Arch Linux + KDE Plasma.
+**Status:** It works — the Win+K experience, on Linux. Press Meta+K, pick
+the tablet, and it becomes a touch-enabled second monitor with audio.
+Verified against a Samsung Tab S8+ from Arch Linux + KDE Plasma.
 
 ## What works today
 
+- **A real cast picker**: Meta+K opens a small Qt tray app — pick the
+  tablet, choose Mirror or Extend, connect; disconnect from the tray.
+  The picker is a thin shell over the CLI, so the protocol machinery
+  stays in one place
 - **Extended desktop** at the tablet's native 16:10 shape (1920x1200), or
   classic mirroring at panel-native 1080p — ~150 ms typical latency
 - **Touch**: tablet touches drive the Linux pointer (UIBC); tap = click
@@ -14,10 +19,27 @@ against a Samsung Tab S8+ from Arch Linux + KDE Plasma.
   (AAC 48 kHz); laptop volume keys scale the stream, tablet volume scales
   its output — the two multiply
 - **One command, no sudo**: `python -m vilya connect --display extend`
-  (after a one-time `python -m vilya setup-extend` for native-size
-  virtual monitors)
+  works without the GUI
 - Sessions survive idle indefinitely; everything tears down cleanly
-  (virtual monitor removed, audio routing restored) on Ctrl-C
+  (virtual monitor removed, audio routing restored) on Ctrl-C or
+  Disconnect
+
+## Running it
+
+```
+pip install -e ".[ui]"        # PySide6 is only needed for the picker
+python -m vilya setup-extend  # once: allow native-size virtual monitors
+python -m vilya setup-ui      # once: desktop entry + the Meta+K shortcut
+
+# then either press Meta+K and pick the tablet, or:
+python -m vilya connect --display extend
+```
+
+`setup-ui` registers the shortcut through kglobalaccel's D-Bus client API
+(`doRegister`/`setShortcutKeys`) rather than config-file edits — the daemon
+lives inside kwin_wayland and, as this repo learned the hard way, a
+malformed message to it takes down the entire compositor (see
+docs/todo.md).
 
 Positioning vs. gnome-network-displays: g-n-d mirrors your screen to a
 Miracast sink. Vilya makes a Miracast sink a full second monitor —
@@ -50,6 +72,12 @@ Vilya is written in Python for the prototype phase. If the prototype proves out 
 ## Why
 
 Miracast has had a rough time on Linux. gnome-network-displays works, but requires extra work to implement audio. Discovery is not smooth, and requires a good amount of troubleshooting to get working. The GStreamer pipeline has a bunch of issues and is not easy to work with. The most damning of issues though, is that it is not seamless. On Windows 11, I can tap Win + K, select my Galaxy Tab S8+, and it will connect perfectly. I can then use it as a touch enabled device and play audio over it. No issues. No troubleshooting. No finagling and bargaining. It just works (heh). This is the goal for Vilya. If I can get it working on my machine in that manner, then I will expand and publish it out and try to get it working for all other Linux devices.
+
+**Update, June 2026:** on this machine, the goal is reached. Meta+K, pick
+the Tab, and it connects — extended touch display, audio and all. The
+first draft of this very update was typed with the tablet as the screen.
+What remains is the second half of the sentence above: making it work for
+everyone else.
 
 
 ## A Note

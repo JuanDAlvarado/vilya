@@ -62,12 +62,14 @@ class WFDSession:
         local_host: str,
         sink_port: int = RTSP_PORT,
         video_format_line: Optional[str] = None,
+        advertise_audio: bool = True,
         on_state_change: Optional[Callable[[SessionState], None]] = None,
     ) -> None:
         self.sink_host = sink_host
         self.local_host = local_host
         self.sink_port = sink_port
         self.video_format_line = video_format_line
+        self.advertise_audio = advertise_audio
         self._on_state_change = on_state_change
 
         self._state = SessionState.IDLE
@@ -387,9 +389,16 @@ class WFDSession:
         video_line = self.video_format_line or (
             "wfd_video_formats: 00 00 01 01 00000020 00000000 00000000 00 0000 0000 00 none none"
         )
+        # Advertising audio we never send makes some sinks buffer video
+        # waiting for lip-sync against a stream that never arrives.
+        audio_line = (
+            "wfd_audio_codecs: LPCM 00000002 00\r\n"
+            if self.advertise_audio
+            else ""
+        )
         body = (
             f"{video_line}\r\n"
-            "wfd_audio_codecs: LPCM 00000002 00\r\n"
+            f"{audio_line}"
             f"wfd_presentation_URL: rtsp://{self.local_host}/wfd1.0/streamid=0 none\r\n"
             "wfd_client_rtp_ports: RTP/AVP/UDP;unicast 19000 0 mode=play\r\n"
         ).encode()

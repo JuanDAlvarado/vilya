@@ -30,25 +30,34 @@ SCREENCAST_IFACE = "org.freedesktop.portal.ScreenCast"
 REQUEST_IFACE = "org.freedesktop.portal.Request"
 
 SOURCE_TYPE_MONITOR = 1
+SOURCE_TYPE_VIRTUAL = 4  # compositor creates a brand-new virtual monitor
 CURSOR_MODE_EMBEDDED = 2
 PERSIST_MODE_PERMANENT = 2
 
-TOKEN_PATH = Path(
+_STATE_DIR = Path(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
-) / "vilya" / "screencast-token"
+) / "vilya"
 
 
-def _load_restore_token() -> Optional[str]:
+def _token_path(virtual: bool) -> Path:
+    # Separate tokens: restoring a monitor choice into a virtual-type
+    # session (or vice versa) restores the wrong source.
+    return _STATE_DIR / (
+        "screencast-token-virtual" if virtual else "screencast-token"
+    )
+
+
+def _load_restore_token(virtual: bool) -> Optional[str]:
     try:
-        return TOKEN_PATH.read_text().strip() or None
+        return _token_path(virtual).read_text().strip() or None
     except OSError:
         return None
 
 
-def _save_restore_token(token: str) -> None:
+def _save_restore_token(token: str, virtual: bool) -> None:
     try:
-        TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_PATH.write_text(token)
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _token_path(virtual).write_text(token)
     except OSError as exc:
         log.warning("Could not persist screencast restore token: %s", exc)
 
@@ -65,12 +74,17 @@ class ScreenCastSession:
         self.pipewire_fd: Optional[int] = None
         self.node_id: Optional[int] = None
 
-    async def open(self, force_picker: bool = False) -> None:
+    async def open(
+        self, force_picker: bool = False, virtual: bool = False
+    ) -> None:
         """Run the full portal negotiation. May show the picker dialog.
 
         ``force_picker`` ignores the saved restore token so the user can
         re-choose which screen to share; the new choice is then saved.
+        ``virtual`` asks the compositor for a brand-new virtual monitor
+        (extended-desktop mode) instead of capturing an existing screen.
         """
+        self._virtual = virtual
         self._bus = await MessageBus(
             bus_type=BusType.SESSION, negotiate_unix_fd=True
         ).connect()
@@ -85,12 +99,14 @@ class ScreenCastSession:
         self._session_handle = results["session_handle"].value
 
         select_opts = {
-            "types": Variant("u", SOURCE_TYPE_MONITOR),
+            "types": Variant(
+                "u", SOURCE_TYPE_VIRTUAL if virtual else SOURCE_TYPE_MONITOR
+            ),
             "multiple": Variant("b", False),
             "cursor_mode": Variant("u", CURSOR_MODE_EMBEDDED),
             "persist_mode": Variant("u", PERSIST_MODE_PERMANENT),
         }
-        token = None if force_picker else _load_restore_token()
+        token = None if force_picker else _load_restore_token(virtual)
         if token:
             select_opts["restore_token"] = Variant("s", token)
         await self._request(
@@ -108,7 +124,7 @@ class ScreenCastSession:
         self.node_id = streams[0][0]
         new_token = results.get("restore_token")
         if new_token:
-            _save_restore_token(new_token.value)
+            _save_restore_token(new_token.value, virtual)
 
         self.pipewire_fd = await self._screencast.call_open_pipe_wire_remote(
             self._session_handle, {}

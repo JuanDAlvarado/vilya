@@ -148,8 +148,16 @@ async def cmd_connect(args: argparse.Namespace) -> int:
         pw_fd = pw_node = None
         if args.source == "screen":
             portal = ScreenCastSession()
-            await portal.open(force_picker=args.reselect)
+            await portal.open(
+                force_picker=args.reselect,
+                virtual=(args.display == "extend"),
+            )
             pw_fd, pw_node = portal.pipewire_fd, portal.node_id
+            if args.display == "extend":
+                log.info(
+                    "Extended-desktop mode: a virtual monitor will appear "
+                    "in Plasma once streaming starts (drag windows onto it)"
+                )
 
         # In WFD the source LISTENS on its RTSP port (7236) and the sink
         # dials in. We advertise 7236 in our WFD IE, so the Tab connects
@@ -164,6 +172,7 @@ async def cmd_connect(args: argparse.Namespace) -> int:
             sink_ip,
             local_ip,
             video_format_line=mode.m4_video_formats,
+            advertise_audio=not args.no_audio,
             on_state_change=lambda s: log.info("RTSP state: %s", s.value),
         )
         # Bind 0.0.0.0 so we accept the sink's connection on whichever
@@ -250,6 +259,19 @@ def main() -> int:
         "--reselect",
         action="store_true",
         help="show the screen picker again instead of reusing the saved choice",
+    )
+    p_conn.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="don't advertise audio in M4 (latency A/B: sinks may buffer "
+        "video waiting for an audio stream we don't send yet)",
+    )
+    p_conn.add_argument(
+        "--display",
+        choices=["mirror", "extend"],
+        default="mirror",
+        help="mirror an existing screen (default) or create a virtual "
+        "monitor so the sink acts as an extended desktop",
     )
     p_conn.set_defaults(func=cmd_connect)
 

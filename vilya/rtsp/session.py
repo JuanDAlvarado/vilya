@@ -401,10 +401,11 @@ class WFDSession:
         video_line = self.video_format_line or (
             "wfd_video_formats: 00 00 01 01 00000020 00000000 00000000 00 0000 0000 00 none none"
         )
-        # Advertising audio we never send makes some sinks buffer video
-        # waiting for lip-sync against a stream that never arrives.
+        # AAC 48 kHz stereo: what the Tab offers in M3, and what the
+        # pipeline encodes (standard AAC-in-TS; WFD's LPCM needs a
+        # private-stream encapsulation GStreamer doesn't provide).
         audio_line = (
-            "wfd_audio_codecs: LPCM 00000002 00\r\n"
+            "wfd_audio_codecs: AAC 00000001 00\r\n"
             if self.advertise_audio
             else ""
         )

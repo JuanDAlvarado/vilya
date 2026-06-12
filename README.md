@@ -2,16 +2,47 @@
 
 Vilya is my attempt to implement a Windows Key + K type implementation to my Dell XPS 13 running Arch Linux and KDE Plasma. The goal is for this to be as frictionless as possible with the least amount of dependencies as possible.
 
-**Status:** Active development, prototype level.
+**Status:** It works. Extended display, touch input, and audio — verified
+against a Samsung Tab S8+ from Arch Linux + KDE Plasma.
+
+## What works today
+
+- **Extended desktop** at the tablet's native 16:10 shape (1920x1200), or
+  classic mirroring at panel-native 1080p — ~150 ms typical latency
+- **Touch**: tablet touches drive the Linux pointer (UIBC); tap = click
+- **Audio** follows the cast: the laptop goes silent, the tablet plays
+  (AAC 48 kHz); laptop volume keys scale the stream, tablet volume scales
+  its output — the two multiply
+- **One command, no sudo**: `python -m vilya connect --display extend`
+  (after a one-time `python -m vilya setup-extend` for native-size
+  virtual monitors)
+- Sessions survive idle indefinitely; everything tears down cleanly
+  (virtual monitor removed, audio routing restored) on Ctrl-C
+
+Positioning vs. gnome-network-displays: g-n-d mirrors your screen to a
+Miracast sink. Vilya makes a Miracast sink a full second monitor —
+extended display, touch input, audio — as a lean CLI/daemon-to-be,
+desktop-agnostic at the protocol layer (the capture layer is KDE-first
+for now).
 
 
 ## How It Works
 
 Miracast is also named 'Wi-Fi Display', which is a Wi-Fi Alliance standard. You can read about it [here](https://raw.githubusercontent.com/wiki/albfan/miraclecast/files/Wi-Fi_Display_Technical_Specification_v2.1_0.pdf).
 
-The laptop and the remote display create a network with the laptop as Group Owner of the Wi-Fi Direct (P2P) network. There are 7 distinct stages of the WFD RTSP session (M1-M7) in which the source and sink negotiate the connection parameters once at session start. After that, the RTP/UDP media stream (using H.264 + LPCM audio codecs) carries video and audio to the sink device at high frequency.
+The laptop and the remote display form a Wi-Fi Direct (P2P) group (with the
+tablet as Group Owner, it turns out — it assigns us an address during the WPA
+handshake, no DHCP needed). The source then *listens* on RTSP port 7236; the
+sink dials in and the 7-stage WFD session (M1-M7) negotiates parameters.
+After that, an RTP/UDP MPEG-TS stream (H.264 + AAC) carries video and audio,
+and the sink opens a second TCP channel back to us (UIBC) carrying touch
+events, which land in the kernel via /dev/uinput.
 
-Vilya will control each layer directly. Current Linux Miracast implementations make use of NetworkManager or a larger GNOME stack. Vilya will be self-sufficient and lean.
+Vilya drives each layer directly where the OS allows: NetworkManager's D-Bus
+API for P2P (NM deliberately destroys P2P groups formed behind its back — a
+lesson this repo's docs/todo.md records in blood), wpa_supplicant directly on
+NM-less systems, KWin's screencast Wayland protocol for native-size virtual
+monitors, and GStreamer for the media pipeline.
 
 Vilya is written in Python for the prototype phase. If the prototype proves out end-to-end, the plan is to rewrite in Go for distribution as a proper system daemon.
 

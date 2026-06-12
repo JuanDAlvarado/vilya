@@ -28,8 +28,9 @@ from .input.uibc import (
     UIBCServer,
 )
 from .input.uinput import AbsolutePointer
+from .media import audio
 from .media.kwin_screencast import KWinVirtualOutput
-from .media.pipeline import MediaPipeline, missing_elements
+from .media.pipeline import MediaPipeline, default_monitor, missing_elements
 from .media.portal import ScreenCastSession
 from .modes import MODES
 from .p2p.dhcp import SERVER_IP, DHCPServer
@@ -113,7 +114,17 @@ async def _start_uibc(
 
 
 async def cmd_connect(args: argparse.Namespace) -> int:
-    missing = missing_elements()
+    audio_monitor = None
+    audio_route = None
+    if not args.no_audio:
+        audio_route = audio.setup()
+        if audio_route:
+            audio_monitor = audio_route.monitor
+        else:
+            audio_monitor = default_monitor()  # plays on both, but works
+        if audio_monitor is None:
+            log.warning("No default audio sink found; continuing without audio")
+    missing = missing_elements(audio=audio_monitor is not None)
     if missing:
         log.error(
             "Missing GStreamer elements: %s. Install: "
@@ -238,7 +249,7 @@ async def cmd_connect(args: argparse.Namespace) -> int:
             sink_ip,
             local_ip,
             video_format_line=mode.m4_video_formats,
-            advertise_audio=not args.no_audio,
+            advertise_audio=audio_monitor is not None,
             on_state_change=lambda s: log.info("RTSP state: %s", s.value),
         )
         # Bind 0.0.0.0 so we accept the sink's connection on whichever
@@ -256,6 +267,7 @@ async def cmd_connect(args: argparse.Namespace) -> int:
                         pipewire_fd=pw_fd,
                         pipewire_node=pw_node,
                         mode=mode,
+                        audio_monitor=audio_monitor,
                     )
                     pipeline.start()
                     if session.uibc_negotiated:
@@ -282,6 +294,8 @@ async def cmd_connect(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         return 0
     finally:
+        if audio_route:
+            audio.teardown(audio_route)
         if uibc:
             uibc.stop()
         if pointer:
@@ -418,8 +432,7 @@ def main() -> int:
     p_conn.add_argument(
         "--no-audio",
         action="store_true",
-        help="don't advertise audio in M4 (latency A/B: sinks may buffer "
-        "video waiting for an audio stream we don't send yet)",
+        help="video only: no desktop audio capture and no audio in M4",
     )
     p_conn.add_argument(
         "--display",

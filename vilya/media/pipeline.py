@@ -40,16 +40,25 @@ REQUIRED_ELEMENTS = [
 ]
 
 
-def missing_elements() -> list[str]:
+def missing_elements(audio: bool = False) -> list[str]:
     """Return GStreamer elements we need but the system lacks."""
     missing = []
-    for element in REQUIRED_ELEMENTS:
+    for element in REQUIRED_ELEMENTS + (["fdkaacenc", "pulsesrc"] if audio else []):
         res = subprocess.run(
             ["gst-inspect-1.0", "--exists", element], capture_output=True
         )
         if res.returncode != 0:
             missing.append(element)
     return missing
+
+
+def default_monitor() -> Optional[str]:
+    """PulseAudio/PipeWire monitor source of the default output."""
+    res = subprocess.run(
+        ["pactl", "get-default-sink"], capture_output=True, text=True
+    )
+    sink = res.stdout.strip()
+    return f"{sink}.monitor" if res.returncode == 0 and sink else None
 
 
 def build_pipeline(
@@ -59,8 +68,14 @@ def build_pipeline(
     pipewire_fd: Optional[int] = None,
     pipewire_node: Optional[int] = None,
     mode: VideoMode = DEFAULT_MODE,
+    audio_monitor: Optional[str] = None,
 ) -> str:
-    """Return the gst-launch pipeline description string."""
+    """Return the gst-launch pipeline description string.
+
+    With ``audio_monitor`` set, desktop audio is captured from that
+    Pulse/PipeWire monitor source, AAC-encoded, and muxed into the same
+    transport stream (the Tab advertises AAC 48 kHz stereo in M3).
+    """
     caps = (
         f"video/x-raw,format=I420,width={mode.width},height={mode.height},"
         f"framerate={mode.fps}/1"
@@ -105,11 +120,22 @@ def build_pipeline(
         f"vbv-buf-capacity=300 "
         f"! video/x-h264,profile={mode.gst_profile} "
         f"! h264parse config-interval=1 "
-        f"! mpegtsmux alignment=7 "
+        f"! mux. "
+        f"mpegtsmux name=mux alignment=7 "
         f"! rtpmp2tpay "
         f"! udpsink host={sink_host} port={sink_port} sync=false"
     )
-    return head + tail
+    audio = ""
+    if audio_monitor:
+        audio = (
+            f" pulsesrc device={audio_monitor} "
+            f"! audio/x-raw,rate=48000,channels=2 "
+            f"! audioconvert ! audioresample "
+            f"! fdkaacenc bitrate=192000 ! aacparse "
+            f"! queue max-size-time=200000000 leaky=downstream "
+            f"! mux."
+        )
+    return head + tail + audio
 
 
 class MediaPipeline:
@@ -123,9 +149,16 @@ class MediaPipeline:
         pipewire_fd: Optional[int] = None,
         pipewire_node: Optional[int] = None,
         mode: VideoMode = DEFAULT_MODE,
+        audio_monitor: Optional[str] = None,
     ) -> None:
         self.description = build_pipeline(
-            sink_host, sink_port, source, pipewire_fd, pipewire_node, mode
+            sink_host,
+            sink_port,
+            source,
+            pipewire_fd,
+            pipewire_node,
+            mode,
+            audio_monitor,
         )
         self._pipewire_fd = pipewire_fd
         self._proc: Optional[subprocess.Popen] = None

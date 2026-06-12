@@ -38,7 +38,7 @@ class TestBuildPipeline:
         assert "host=192.168.49.1" in desc
         assert "port=19000" in desc
         assert "rtpmp2tpay" in desc
-        assert "mpegtsmux alignment=7" in desc
+        assert "mpegtsmux name=mux alignment=7" in desc
 
     def test_mode_drives_encoder(self):
         desc = build_pipeline(
@@ -90,3 +90,19 @@ class TestBuildPipeline:
         parts = shlex.split(desc)
         assert "timeoverlay" in parts
         assert any(p.startswith("font-desc=") for p in parts)
+
+
+class TestAudio:
+    def test_audio_branch(self):
+        desc = build_pipeline(
+            "10.0.0.1", 19000, source="test",
+            audio_monitor="alsa_output.test.monitor",
+        )
+        assert "pulsesrc device=alsa_output.test.monitor" in desc
+        assert "fdkaacenc" in desc
+        assert desc.count("mux.") == 2  # video and audio both feed the mux
+        assert "mpegtsmux name=mux" in desc
+
+    def test_no_audio_by_default(self):
+        desc = build_pipeline("10.0.0.1", 19000, source="test")
+        assert "pulsesrc" not in desc

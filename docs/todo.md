@@ -150,7 +150,13 @@ Goal: screen pixels flow from KDE Plasma → Tab display via RTP.
   (rolling refresh, no keyframe bursts — what Windows uses for Miracast).
 - Mirror resolution is capped by the panel (1920x1080): streaming higher would
   only upscale.
-- [ ] Audio: LPCM 48 kHz capture (pipewiresrc monitor) muxed into the TS
+- [x] **Audio: DONE (2026-06-12)** — AAC 48 kHz stereo instead of LPCM (the Tab
+      offers AAC in M3; AAC-in-TS is standard, WFD LPCM needs a private-stream
+      encapsulation GStreamer lacks). Desktop audio is routed through a session
+      null sink (`vilya_cast`): laptop goes silent, the Tab is the audio
+      device, previous default restored on teardown. Volume is two-stage by
+      design: laptop keys scale the encoded stream, the Tab's buttons scale
+      its own output — they multiply (extra granularity, verified welcome).
 - [ ] Complete `_process_m3_response`: real capability negotiation for M4
 - [ ] Tune encoder (bitrate/latency); consider vah264enc (Intel VA-API) later
 - [ ] Latency/quality pass once pixels are flowing

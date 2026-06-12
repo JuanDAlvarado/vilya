@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import sys
 
@@ -293,6 +294,10 @@ def main() -> int:
             sys.executable,
         )
         return 2
+
+    # SIGTERM should tear the session down exactly like Ctrl-C, so the
+    # finally-blocks (pipeline stop, RTSP TEARDOWN, NM deactivate) run.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
 
     try:
         return asyncio.run(args.func(args))

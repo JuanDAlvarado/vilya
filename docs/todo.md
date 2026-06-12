@@ -123,6 +123,14 @@ Goal: screen pixels flow from KDE Plasma → Tab display via RTP.
 
 ### Known behavior / open items
 
+- **Samsung stale-pairing wedge** (bit us 2026-06-12): every vilya session makes
+  the Tab (as GO) mint a new persistent group ("DIRECT-xx"). After ~15
+  accumulated entries the Tab still completes P2P pairing but its Miracast
+  client never dials our RTSP port — looks exactly like a vilya regression but
+  isn't. Fix: clear the Tab's Wi-Fi Direct pairings or reboot it. Long-term:
+  investigate persistent-group reuse / invitation flow (NM's wifi-p2p setting
+  exposes no persistent flag; would need the supplicant backend).
+
 - Samsung shows "Can't show protected content. Stream is not secure." on
   connect: informational — we do no HDCP, so DRM apps won't render over this
   link; normal desktop pixels are unaffected. Implementing HDCP 2.x is out of

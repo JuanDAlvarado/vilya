@@ -27,13 +27,14 @@ class VideoMode:
     level_bits: int  # WFD level bitmap value for M4
     gst_profile: str  # x264enc output caps profile
     bitrate_kbps: int
+    vesa_bit: int = 0  # WFD VESA table (table 5-10); 0 = CEA mode
 
     @property
     def m4_video_formats(self) -> str:
         return (
             f"wfd_video_formats: 00 00 {self.profile_bits:02X} "
-            f"{self.level_bits:02X} {self.cea_bit:08X} 00000000 00000000 "
-            f"00 0000 0000 00 none none"
+            f"{self.level_bits:02X} {self.cea_bit:08X} {self.vesa_bit:08X} "
+            f"00000000 00 0000 0000 00 none none"
         )
 
 
@@ -47,5 +48,12 @@ MODES: dict[str, VideoMode] = {
     ),
     "1080p60": VideoMode(
         "1080p60", 1920, 1080, 60, 0x00000100, 0x02, 0x10, "high", 20000,
+    ),
+    # 16:10, matches the Tab S8+'s panel shape exactly (2800x1752 = 1.6:1).
+    # VESA bit 28 = 1920x1200p30, the largest mode WFD R1 defines. The Tab
+    # under-advertises VESA support in M3 (all zeros) -- acceptance untested.
+    "1200p30": VideoMode(
+        "1200p30", 1920, 1200, 30, 0x00000000, 0x02, 0x10, "high", 16000,
+        vesa_bit=0x10000000,
     ),
 }

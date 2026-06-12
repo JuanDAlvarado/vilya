@@ -135,16 +135,21 @@ Goal: screen pixels flow from KDE Plasma → Tab display via RTP.
   connect: informational — we do no HDCP, so DRM apps won't render over this
   link; normal desktop pixels are unaffected. Implementing HDCP 2.x is out of
   scope (licensed keys). May also flash during the ~1 s PLAY→first-RTP gap.
-- **Extended (vs mirrored) display**: requires creating a virtual output. KWin
-  (Plasma 6.6) exposes no D-Bus for this; the path is KWin's
-  `zkde_screencast_unstable_v1` Wayland protocol (create-virtual-output-stream,
-  as used by krfb-virtualmonitor) → yields a PipeWire node directly. Pairs
-  naturally with streaming a Tab-native-ish resolution (2560x1600 via WFD VESA
-  modes) since a virtual display isn't bound to the panel's 1080p. Big feature,
-  own cycle.
+- **Extended display: DONE (2026-06-12).** Two routes, best-first:
+  (1) KWin's `zkde_screencast_unstable_v1` via our hand-rolled Wayland client
+  (`vilya/media/kwin_screencast.py`) — any size; requires the whitelist that
+  `vilya setup-extend` installs (interpreter copy + desktop file with
+  X-KDE-Wayland-Interfaces, matched by /proc/pid/exe) and launching via
+  `.venv/bin/vilya-python`. (2) Portal VIRTUAL source fallback (fixed 1080p).
+  The Tab ACCEPTS WFD VESA 1920x1200p30 (M4 200 OK) despite advertising no
+  VESA modes — extend defaults to 1200p30, full-bleed 16:10. Latency measured
+  100-230 ms across runs.
+- **Latency variance**: most sessions settle ~150-200 ms; occasionally one
+  calibrates >1 s at startup and stays there (Tab's adaptive jitter buffer vs
+  our 1/s IDR bursts, most likely). Next experiment: x264 `intra-refresh=true`
+  (rolling refresh, no keyframe bursts — what Windows uses for Miracast).
 - Mirror resolution is capped by the panel (1920x1080): streaming higher would
-  only upscale. Higher-than-panel resolution only makes sense with a virtual
-  display (above).
+  only upscale.
 - [ ] Audio: LPCM 48 kHz capture (pipewiresrc monitor) muxed into the TS
 - [ ] Complete `_process_m3_response`: real capability negotiation for M4
 - [ ] Tune encoder (bitrate/latency); consider vah264enc (Intel VA-API) later

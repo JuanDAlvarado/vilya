@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 
+from .media.kwin_screencast import KWinVirtualOutput
 from .media.pipeline import MediaPipeline, missing_elements
 from .media.portal import ScreenCastSession
 from .modes import MODES
@@ -87,6 +88,9 @@ async def cmd_connect(args: argparse.Namespace) -> int:
     dhcp: DHCPServer | None = None
     session: WFDSession | None = None
     pipeline: MediaPipeline | None = None
+    portal: ScreenCastSession | None = None
+    kwin_output: KWinVirtualOutput | None = None
+    pw_fd = pw_node = None
     try:
         await dev.set_device_name(args.name)
         await dev.set_wfd_ie()
@@ -144,20 +148,41 @@ async def cmd_connect(args: argparse.Namespace) -> int:
         # Negotiate screen capture BEFORE the RTSP handshake: the portal
         # may show a picker dialog, and the Tab only waits ~20 s for RTP
         # after PLAY. With a restore token this is instant.
-        portal = None
-        pw_fd = pw_node = None
+        mode = MODES[
+            args.mode or ("1200p30" if args.display == "extend" else "1080p30")
+        ]
         if args.source == "screen":
-            portal = ScreenCastSession()
-            await portal.open(
-                force_picker=args.reselect,
-                virtual=(args.display == "extend"),
-            )
-            pw_fd, pw_node = portal.pipewire_fd, portal.node_id
             if args.display == "extend":
+                # Prefer KWin's native protocol: it honors our exact
+                # dimensions (e.g. 1920x1200). Needs the whitelisted
+                # interpreter (vilya setup-extend); fall back to the
+                # portal's fixed-1080p virtual output otherwise.
+                kwin_output = KWinVirtualOutput()
+                try:
+                    pw_node = await kwin_output.open(
+                        mode.width, mode.height, name="vilya"
+                    )
+                    pw_fd = None
+                except RuntimeError as exc:
+                    log.warning(
+                        "KWin virtual output unavailable (%s); falling "
+                        "back to portal (fixed 1080p). For native sizes "
+                        "run 'vilya setup-extend' once and launch via "
+                        ".venv/bin/vilya-python.",
+                        exc,
+                    )
+                    kwin_output = None
+                    portal = ScreenCastSession()
+                    await portal.open(force_picker=args.reselect, virtual=True)
+                    pw_fd, pw_node = portal.pipewire_fd, portal.node_id
                 log.info(
                     "Extended-desktop mode: a virtual monitor will appear "
                     "in Plasma once streaming starts (drag windows onto it)"
                 )
+            else:
+                portal = ScreenCastSession()
+                await portal.open(force_picker=args.reselect)
+                pw_fd, pw_node = portal.pipewire_fd, portal.node_id
 
         # In WFD the source LISTENS on its RTSP port (7236) and the sink
         # dials in. We advertise 7236 in our WFD IE, so the Tab connects
@@ -167,7 +192,6 @@ async def cmd_connect(args: argparse.Namespace) -> int:
             local_ip,
             sink_ip,
         )
-        mode = MODES[args.mode]
         session = WFDSession(
             sink_ip,
             local_ip,
@@ -208,6 +232,11 @@ async def cmd_connect(args: argparse.Namespace) -> int:
     finally:
         if pipeline:
             pipeline.stop()
+        if kwin_output:
+            try:
+                await kwin_output.close()
+            except Exception:
+                pass
         if session:
             try:
                 await session.teardown()
@@ -217,6 +246,47 @@ async def cmd_connect(args: argparse.Namespace) -> int:
             dhcp.stop()
         await dev.disconnect()
         await dev.close()
+
+
+async def cmd_setup_extend(args: argparse.Namespace) -> int:
+    """Install the KWin whitelist pieces for native-size virtual outputs.
+
+    KWin only exposes its screencast protocol to executables matched to
+    a desktop file declaring X-KDE-Wayland-Interfaces. A *copy* (not
+    symlink) of the interpreter gives vilya its own /proc/<pid>/exe
+    identity to whitelist.
+    """
+    venv_bin = os.path.dirname(sys.executable)
+    dedicated = os.path.join(venv_bin, "vilya-python")
+    real = os.path.realpath(sys.executable)
+    if os.path.realpath(dedicated) != real or not os.path.exists(dedicated):
+        shutil.copy2(real, dedicated)
+    log.info("Interpreter copy: %s", dedicated)
+
+    apps = os.path.join(
+        os.environ.get(
+            "XDG_DATA_HOME", os.path.expanduser("~/.local/share")
+        ),
+        "applications",
+    )
+    os.makedirs(apps, exist_ok=True)
+    desktop = os.path.join(apps, "vilya.desktop")
+    with open(desktop, "w") as f:
+        f.write(
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=Vilya\n"
+            f"Exec={dedicated}\n"
+            "NoDisplay=true\n"
+            "X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1\n"
+        )
+    log.info("Desktop entry: %s", desktop)
+    subprocess.run(["kbuildsycoca6"], capture_output=True)
+    log.info(
+        "Done. Use extended mode via: %s -m vilya connect --display extend",
+        dedicated,
+    )
+    return 0
 
 
 def main() -> int:
@@ -251,9 +321,9 @@ def main() -> int:
     p_conn.add_argument(
         "--mode",
         choices=sorted(MODES),
-        default="1080p30",
-        help="video mode (resolution/framerate); 1080p30 is the panel's "
-        "native resolution so no scaling is needed",
+        default=None,
+        help="video mode (resolution/framerate). Defaults: mirror=1080p30 "
+        "(panel-native), extend=1200p30 (Tab-native 16:10 shape)",
     )
     p_conn.add_argument(
         "--reselect",
@@ -274,6 +344,13 @@ def main() -> int:
         "monitor so the sink acts as an extended desktop",
     )
     p_conn.set_defaults(func=cmd_connect)
+
+    p_setup = sub.add_parser(
+        "setup-extend",
+        help="one-time install of the KWin whitelist for native-size "
+        "virtual outputs (extended-desktop mode)",
+    )
+    p_setup.set_defaults(func=cmd_setup_extend)
 
     # Accept global flags after the subcommand too; SUPPRESS keeps the
     # subparser from clobbering values given before it.

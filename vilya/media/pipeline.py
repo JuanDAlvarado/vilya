@@ -77,8 +77,11 @@ def build_pipeline(
             f"! timeoverlay font-desc=\"Sans 36\" "
         )
     elif source == "screen":
-        if pipewire_fd is None or pipewire_node is None:
-            raise ValueError("screen source requires pipewire fd and node id")
+        if pipewire_node is None:
+            raise ValueError("screen source requires a pipewire node id")
+        # fd is the portal's private PipeWire connection; KWin-native
+        # virtual-output nodes live on the default connection (no fd).
+        fd_prop = f"fd={pipewire_fd} " if pipewire_fd is not None else ""
         # Convert to I420 before scaling: half the bytes of BGRx, and at
         # native panel resolution videoscale becomes a passthrough.
         # keepalive-time: KWin only sends frames on screen damage; a
@@ -86,7 +89,7 @@ def build_pipeline(
         # the session after ~20 s of silence. Resend the last frame
         # every 500 ms when idle.
         head = (
-            f"pipewiresrc fd={pipewire_fd} path={pipewire_node} "
+            f"pipewiresrc {fd_prop}path={pipewire_node} "
             f"do-timestamp=true keepalive-time=500 "
             f"! {_LEAKY_Q} "
             f"! videoconvert n-threads=4 ! video/x-raw,format=I420 "

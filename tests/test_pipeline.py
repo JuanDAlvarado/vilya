@@ -26,7 +26,8 @@ class TestVideoModes:
     def test_modes_consistent(self):
         for mode in MODES.values():
             assert mode.width > 0 and mode.height > 0 and mode.fps > 0
-            assert mode.cea_bit != 0
+            # Exactly one of the WFD resolution tables must be used.
+            assert (mode.cea_bit != 0) != (mode.vesa_bit != 0)
             assert mode.bitrate_kbps >= 4000
 
 
@@ -61,9 +62,23 @@ class TestBuildPipeline:
         assert "leaky=downstream" in desc
         assert "n-threads=4" in desc
 
-    def test_screen_source_requires_pipewire(self):
+    def test_screen_source_requires_node(self):
         with pytest.raises(ValueError):
             build_pipeline("192.168.49.1", 19000, source="screen")
+
+    def test_screen_source_without_fd(self):
+        # KWin-native virtual outputs have a node but no portal fd.
+        desc = build_pipeline(
+            "192.168.49.1", 19000, source="screen", pipewire_node=42
+        )
+        assert "pipewiresrc path=42" in desc
+        assert "fd=" not in desc
+
+    def test_1200p30_vesa_m4_line(self):
+        assert MODES["1200p30"].m4_video_formats == (
+            "wfd_video_formats: 00 00 02 10 00000000 10000000 00000000 "
+            "00 0000 0000 00 none none"
+        )
 
     def test_unknown_source(self):
         with pytest.raises(ValueError):

@@ -65,6 +65,12 @@ def build_pipeline(
         f"video/x-raw,format=I420,width={mode.width},height={mode.height},"
         f"framerate={mode.fps}/1"
     )
+    # Screen capture is variable-rate by nature (KWin sends on damage).
+    # No videorate and no fixed framerate cap: regulating to constant
+    # rate makes each frame wait for its successor (up to keepalive-time
+    # = 500 ms of added latency). H.264-in-TS is timestamp-driven; sinks
+    # handle VFR fine.
+    vfr_caps = f"video/x-raw,format=I420,width={mode.width},height={mode.height}"
     if source == "test":
         head = (
             f"videotestsrc is-live=true pattern=smpte ! {caps} "
@@ -84,7 +90,7 @@ def build_pipeline(
             f"do-timestamp=true keepalive-time=500 "
             f"! {_LEAKY_Q} "
             f"! videoconvert n-threads=4 ! video/x-raw,format=I420 "
-            f"! videoscale ! videorate ! {caps} "
+            f"! videoscale ! {vfr_caps} "
         )
     else:
         raise ValueError(f"Unknown source {source!r}")

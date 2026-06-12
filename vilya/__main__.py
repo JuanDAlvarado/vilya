@@ -18,6 +18,16 @@ import signal
 import subprocess
 import sys
 
+import json
+
+from .input.uibc import (
+    GENERIC_TOUCH_DOWN,
+    GENERIC_TOUCH_MOVE,
+    GENERIC_TOUCH_UP,
+    TouchEvent,
+    UIBCServer,
+)
+from .input.uinput import AbsolutePointer
 from .media.kwin_screencast import KWinVirtualOutput
 from .media.pipeline import MediaPipeline, missing_elements
 from .media.portal import ScreenCastSession
@@ -72,6 +82,36 @@ async def cmd_scan(args: argparse.Namespace) -> int:
         await dev.close()
 
 
+async def _start_uibc(
+    session: WFDSession, mode, target_substr: str
+) -> tuple[UIBCServer, AbsolutePointer]:
+    """Bring up the touch back-channel: uinput device, UIBC listener,
+    then tell the sink to start sending (M14)."""
+    target, union_w, union_h = _screen_layout(target_substr)
+    tx, ty, tw, th = target
+    pointer = AbsolutePointer(union_w, union_h)
+    log.info(
+        "Touch mapping: sink %dx%d -> output at %d,%d (%dx%d) in %dx%d union",
+        mode.width, mode.height, tx, ty, tw, th, union_w, union_h,
+    )
+
+    def on_touch(ev: TouchEvent) -> None:
+        # Sink coords are in mode-space; scale into the target output.
+        x = tx + ev.x * tw // max(mode.width, 1)
+        y = ty + ev.y * th // max(mode.height, 1)
+        if ev.kind == GENERIC_TOUCH_DOWN:
+            pointer.press(x, y)
+        elif ev.kind == GENERIC_TOUCH_MOVE:
+            pointer.move(x, y)
+        elif ev.kind == GENERIC_TOUCH_UP:
+            pointer.release()
+
+    uibc = UIBCServer(on_touch, port=session.uibc_port)
+    await uibc.start()
+    await session.enable_uibc()
+    return uibc, pointer
+
+
 async def cmd_connect(args: argparse.Namespace) -> int:
     missing = missing_elements()
     if missing:
@@ -90,6 +130,8 @@ async def cmd_connect(args: argparse.Namespace) -> int:
     pipeline: MediaPipeline | None = None
     portal: ScreenCastSession | None = None
     kwin_output: KWinVirtualOutput | None = None
+    uibc: UIBCServer | None = None
+    pointer: AbsolutePointer | None = None
     pw_fd = pw_node = None
     try:
         await dev.set_device_name(args.name)
@@ -216,6 +258,16 @@ async def cmd_connect(args: argparse.Namespace) -> int:
                         mode=mode,
                     )
                     pipeline.start()
+                    if session.uibc_negotiated:
+                        try:
+                            target = (
+                                "virtual" if args.display == "extend" else "eDP"
+                            )
+                            uibc, pointer = await _start_uibc(
+                                session, mode, target
+                            )
+                        except Exception as exc:
+                            log.warning("UIBC setup failed: %s", exc)
                 if pipeline and pipeline.poll() is not None:
                     log.error("Media pipeline died; tearing down")
                     break
@@ -230,6 +282,13 @@ async def cmd_connect(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         return 0
     finally:
+        if uibc:
+            uibc.stop()
+        if pointer:
+            try:
+                pointer.close()
+            except Exception:
+                pass
         if pipeline:
             pipeline.stop()
         if kwin_output:
@@ -246,6 +305,32 @@ async def cmd_connect(args: argparse.Namespace) -> int:
             dhcp.stop()
         await dev.disconnect()
         await dev.close()
+
+
+def _screen_layout(target_substr: str) -> tuple[tuple[int, int, int, int], int, int]:
+    """Return ((x, y, w, h) of the target output, union_w, union_h).
+
+    Uses kscreen-doctor JSON. The uinput pointer spans the union of all
+    outputs; touches map into the target output's rectangle within it.
+    """
+    out = subprocess.run(
+        ["kscreen-doctor", "-j"], capture_output=True, text=True, check=True
+    )
+    data = json.loads(out.stdout)
+    union_w = union_h = 0
+    target = None
+    for output in data.get("outputs", []):
+        if not output.get("enabled"):
+            continue
+        pos = output["pos"]
+        size = output["size"]
+        union_w = max(union_w, pos["x"] + size["width"])
+        union_h = max(union_h, pos["y"] + size["height"])
+        if target_substr.lower() in output.get("name", "").lower():
+            target = (pos["x"], pos["y"], size["width"], size["height"])
+    if target is None:
+        raise RuntimeError(f"No enabled output matching {target_substr!r}")
+    return target, union_w, union_h
 
 
 async def cmd_setup_extend(args: argparse.Namespace) -> int:

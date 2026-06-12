@@ -70,6 +70,9 @@ class WFDSession:
         self.sink_port = sink_port
         self.video_format_line = video_format_line
         self.advertise_audio = advertise_audio
+        self.uibc_port = 7239
+        self.uibc_negotiated = False
+        self.sink_params: dict[str, str] = {}  # parsed M3 response
         self._on_state_change = on_state_change
 
         self._state = SessionState.IDLE
@@ -271,6 +274,12 @@ class WFDSession:
             await self._handle_teardown(msg)
         elif method == "GET_PARAMETER":
             await self._reply_ok(msg)
+        elif method == "SET_PARAMETER":
+            # Typically wfd_idr_request after sink-side packet loss. Our
+            # encoder sends an IDR every second, so acknowledge and let
+            # the next keyframe heal it.
+            log.debug("Sink SET_PARAMETER: %s", msg.body.decode(errors="replace").strip())
+            await self._reply_ok(msg)
         else:
             log.warning("Unhandled sink request: %s", method)
             await self._reply(msg, 501, "Not Implemented")
@@ -365,6 +374,7 @@ class WFDSession:
             "wfd_audio_codecs\r\n"
             "wfd_client_rtp_ports\r\n"
             "wfd_display_edid\r\n"
+            "wfd_uibc_capability\r\n"
         ).encode()
         resp = await self._request(
             "GET_PARAMETER",
@@ -379,7 +389,9 @@ class WFDSession:
         """Parse sink capabilities from M3 response body (text/parameters)."""
         for line in resp.body.decode(errors="replace").splitlines():
             log.debug("M3 param: %s", line)
-        # Full capability negotiation will be implemented with the media pipeline.
+            name, sep, value = line.partition(":")
+            if sep:
+                self.sink_params[name.strip()] = value.strip()
 
     # M4 -- Source sets WFD presentation parameters.
     async def _send_m4(self) -> None:
@@ -396,9 +408,23 @@ class WFDSession:
             if self.advertise_audio
             else ""
         )
+        # UIBC: claim Generic touch/mouse only if the sink offered UIBC
+        # in M3 (sending it to a sink that answered 'none' risks a 4xx).
+        sink_uibc = self.sink_params.get("wfd_uibc_capability", "none")
+        uibc_line = ""
+        if sink_uibc.lower() not in ("none", ""):
+            uibc_line = (
+                "wfd_uibc_capability: input_category_list=GENERIC;"
+                "generic_cap_list=Mouse, SingleTouch;hidc_cap_list=none;"
+                f"port={self.uibc_port}\r\n"
+            )
+            self.uibc_negotiated = True
+            log.info("UIBC negotiated (sink offered: %s)", sink_uibc)
+
         body = (
             f"{video_line}\r\n"
             f"{audio_line}"
+            f"{uibc_line}"
             f"wfd_presentation_URL: rtsp://{self.local_host}/wfd1.0/streamid=0 none\r\n"
             "wfd_client_rtp_ports: RTP/AVP/UDP;unicast 19000 0 mode=play\r\n"
         ).encode()
@@ -423,6 +449,22 @@ class WFDSession:
         )
         log.debug("M5 response: %s %s", resp.status_code, resp.reason)
         self._set_state(SessionState.SETUP_WAIT)
+
+    async def enable_uibc(self) -> bool:
+        """M14: ask the sink to start sending input. Call once STREAMING."""
+        if not self.uibc_negotiated:
+            return False
+        resp = await self._request(
+            "SET_PARAMETER",
+            "rtsp://localhost/wfd1.0",
+            {"Content-Type": "text/parameters"},
+            b"wfd_uibc_setting: enable\r\n",
+        )
+        ok = resp.status_code == 200
+        log.info(
+            "UIBC enable: %s %s", resp.status_code, resp.reason or ""
+        )
+        return ok
 
     async def _send_set_parameter_trigger(self, trigger: str) -> None:
         body = f"wfd_trigger_method: {trigger}\r\n".encode()
